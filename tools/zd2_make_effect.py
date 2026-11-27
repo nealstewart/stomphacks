@@ -67,13 +67,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 # TI C6000 install root: override with the ZOOM_TI_CGT env var if your
-# compiler lives somewhere else. The default is the macOS 8.5.0 install path.
+# compiler lives somewhere else. Defaults to .tools/ti-cgt-c6000_8.5.0.LTS
+# inside the repo if present, else the macOS 8.5.0 install path.
+_LOCAL_TI = ROOT / ".tools" / "ti-cgt-c6000_8.5.0.LTS"
 TI = Path(os.environ.get("ZOOM_TI_CGT",
-                         "/Applications/ti/ti-cgt-c6000_8.5.0.LTS")) / "bin"
+                         str(_LOCAL_TI) if _LOCAL_TI.exists()
+                         else "/Applications/ti/ti-cgt-c6000_8.5.0.LTS")) / "bin"
 # venv interpreter differs by OS: Scripts/python.exe on Windows, bin/python3
-# elsewhere.
-PY = ROOT / (".venv/Scripts/python.exe" if os.name == "nt"
-             else ".venv/bin/python3")
+# elsewhere. Fall back to the active interpreter (e.g. pixi) if .venv is absent.
+_VENV_PY = ROOT / (".venv/Scripts/python.exe" if os.name == "nt"
+                   else ".venv/bin/python3")
+PY = _VENV_PY if _VENV_PY.exists() else Path(sys.executable)
 SCAFFOLD_DIR = ROOT / "rebuild" / "bitcrush"
 
 sys.path.insert(0, str(ROOT / "zoom-zt2"))
@@ -498,7 +502,7 @@ STOCK_NAME_INDEX = {stock_name_key(n): n for n in STOCK_EFFECT_NAMES}
 
 
 def load_manifest(path: Path) -> dict:
-    m = json.loads(path.read_text())
+    m = json.loads(path.read_text(encoding="utf-8-sig"))
     problems = []
 
     def need(key, typ):
@@ -2151,17 +2155,48 @@ def main() -> None:
     template.write_bytes(zd2_from_scratch.build_template(
         name=m["name"], eid=int(m["id"], 16),
         version=m.get("version", "1.00")))
-    # --no-strip here: the verify stages want symbol-rich intermediates;
-    # the SHIPPED container is stripped once, in finalize_container
-    # (manifest "strip", default true).
-    script = ROOT / "tools" / "build_zd2_from_asm.sh"
-    bash_args = [script, fname, entry, soname, template, builddir,
-                 builddir / "kernel_c.obj", "--no-strip"]
-    if os.name == "nt":
-        # Git Bash needs forward-slash (C:/...) paths, not Windows backslashes.
-        bash_args = [a.as_posix() if isinstance(a, Path) else a
-                     for a in bash_args]
-    run([_bash(), *bash_args])
+    if os.name == "nt" and not os.environ.get("ZOOM_BASH"):
+        # Native Python execution on Windows avoids MSYS2/Cygwin shared-memory
+        # problems in sandboxed environments while executing the exact same steps
+        # as tools/build_zd2_from_asm.sh (--no-strip here; stripped in finalize).
+        print("== assemble ==")
+        run([TI / "asm6x", "--silicon_version=6740", "--abi=eabi",
+             f"{fname}.asm"], cwd=builddir)
+        print("== link (dynamic shared object) ==")
+        run([TI / "lnk6x",
+             "--dynamic=lib",
+             f"--entry_point={entry}",
+             f"--soname={soname}",
+             "--stack_size=0", "--heap_size=0",
+             "--forced_static_binding=on",
+             "--retain=Fx_*", "--retain=_Fx_*",
+             "--retain=__pop_rts", "--retain=__push_rts",
+             "--retain=__call_stub",
+             f"--retain={entry}",
+             f"--output_file={builddir / f'{fname}.out'}",
+             builddir / "ZD2.cmd",
+             builddir / f"{fname}.obj",
+             builddir / "kernel_c.obj"])
+        print(f"== pack into ZD2 container ({template}) ==")
+        rebuilt = builddir / f"{fname}_rebuilt.ZD2"
+        run([PY, ROOT / "zoom-zt2" / "decode_effect.py",
+             "--donor", builddir / f"{fname}.out", "--donor-elf",
+             "-o", rebuilt, template])
+        print("== validate CRC + round-trip ==")
+        run([PY, ROOT / "zoom-zt2" / "decode_effect.py", "-s", "-V", rebuilt])
+        run([PY, ROOT / "tools" / "zd2_roundtrip.py", rebuilt])
+    else:
+        # --no-strip here: the verify stages want symbol-rich intermediates;
+        # the SHIPPED container is stripped once, in finalize_container
+        # (manifest "strip", default true).
+        script = ROOT / "tools" / "build_zd2_from_asm.sh"
+        bash_args = [script, fname, entry, soname, template, builddir,
+                     builddir / "kernel_c.obj", "--no-strip"]
+        if os.name == "nt":
+            # Git Bash needs forward-slash (C:/...) paths, not Windows backslashes.
+            bash_args = [a.as_posix() if isinstance(a, Path) else a
+                         for a in bash_args]
+        run([_bash(), *bash_args])
 
     print("== 5. verify ==")
     if cleanroom:

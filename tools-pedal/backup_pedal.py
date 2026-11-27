@@ -92,6 +92,24 @@ def walk_is_complete(names, flst_data):
     return not missing, missing, len(entries)
 
 
+class _SysexOnlyPort:
+    """Filter out non-SysEx MIDI traffic (clock, etc.) on receive(), matching
+    file_session.MidoTransport so zoomzt2's raw receive() calls never trip on
+    non-SysEx messages."""
+
+    def __init__(self, port):
+        self._port = port
+
+    def receive(self):
+        while True:
+            msg = self._port.receive()
+            if msg.type == "sysex":
+                return msg
+
+    def __getattr__(self, name):
+        return getattr(self._port, name)
+
+
 class _LogPort:
     """Transparent wrapper around a mido port that appends hex lines to a
     log file. Changes nothing on the wire; used only around the walk so a
@@ -104,9 +122,10 @@ class _LogPort:
 
     def _log(self, direction, msg):
         try:
+            payload = (bytes(msg.data).hex() if msg.type == "sysex"
+                       else str(msg))
             with open(self._logfile, "a") as f:
-                f.write("%s %s %s\n" % (self._tag, direction,
-                                        bytes(msg.data).hex()))
+                f.write("%s %s %s\n" % (self._tag, direction, payload))
         except OSError:
             pass  # logging must never break the walk
 
@@ -260,6 +279,7 @@ def main():
     pedal = zoomzt2.zoomzt2()
     if not pedal.connect():
         sys.exit("FAIL: pedal not found on USB-MIDI.")
+    pedal.inport = _SysexOnlyPort(pedal.inport)
     pedal.pcmode_on()
 
     usage = pedal.disk_usage()

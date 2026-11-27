@@ -56,12 +56,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # elsewhere); the default is the macOS 8.5.0 install path. Under Git Bash on
 # Windows, "$TI/asm6x" resolves asm6x.exe automatically (MSYS appends .exe).
 TI="${ZOOM_TI_CGT:-/Applications/ti/ti-cgt-c6000_8.5.0.LTS}/bin"
-# venv interpreter: Windows (Git Bash) has .venv/Scripts/python.exe, POSIX has
-# .venv/bin/python3.
-if [ -x "$ROOT/.venv/Scripts/python.exe" ]; then
+# Python interpreter: prefer explicit PYTHON, then .venv, then pixi, then PATH.
+if [ -n "${PYTHON:-}" ]; then
+    PY="$PYTHON"
+elif [ -x "$ROOT/.venv/Scripts/python.exe" ]; then
     PY="$ROOT/.venv/Scripts/python.exe"
-else
+elif [ -x "$ROOT/.venv/bin/python3" ]; then
     PY="$ROOT/.venv/bin/python3"
+elif [ -x "$ROOT/.pixi/envs/default/python.exe" ]; then
+    PY="$ROOT/.pixi/envs/default/python.exe"
+else
+    PY="$(command -v python3 || command -v python)"
 fi
 DECODE="$ROOT/zoom-zt2/decode_effect.py"
 CMD="$WORKDIR/ZD2.cmd"
