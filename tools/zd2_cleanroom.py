@@ -94,6 +94,29 @@ SECTIONS
 """
 
 
+# Zoom MS Plus LCD font glyph bytes for rhythmic note subdivisions
+# (0x16 = 1/32, 0x17 = 1/16, 0x18 = 1/8, 0x19 = 1/4, 0x1a = 1/2).
+ZOOM_NOTE_GLYPHS: dict[str, bytes] = {
+    "1/32": b"\x16",
+    "1/16": b"\x17",
+    "1/8T": b"\x19 3",
+    "1/16.": b"\x17.",
+    "1/8": b"\x18",
+    "1/4T": b"\x1a 3",
+    "1/8.": b"\x18.",
+    "1/4": b"\x19",
+    "1/4.": b"\x19.",
+    "1/2": b"\x1a",
+}
+
+
+def encode_param_label(label: str, stride: int, *, use_note_glyphs: bool = False) -> bytes:
+    """Encode a selector/time_sync label to fixed-stride NUL-padded LCD bytes."""
+    raw = (ZOOM_NOTE_GLYPHS.get(label, label.encode("ascii"))
+           if use_note_glyphs else label.encode("ascii"))
+    return raw.ljust(stride, b"\0")
+
+
 def pack_name_words(name: str) -> tuple[int, int, int]:
     """Pack an ascii name into the 3 leading words of a param-table entry."""
     return struct.unpack("<3I", name.encode("ascii").ljust(12, b"\0"))
@@ -307,8 +330,10 @@ Fx_SFX_{s}_onf:
 ; the call; args/return in the EABI regs (A4, B4, A6 / A4). The parallel
 ; pairs and slot counts are forced by the 5 branch delay slots.
 \t.def __call_stub
+\t.def __c6xabi_call_stub
 \t.align 32
 __call_stub:
+__c6xabi_call_stub:
            STW.D2T1      A2,*B15--[2]
            B.S2          B31               ; enter host fn after 5 delay slots
  ||        STDW.D2T1     A7:A6,*B15--[1]
@@ -330,7 +355,85 @@ __cr_stub_ret:
            NOP           4
 """
 
-    return dll + init + onf + call_stub
+    itoa_helper = """
+; --- Aw_itoa4: format unsigned 0..9999 in A4 as ASCII decimal into *B4, NUL-terminated.
+; Inputs: A4 = value (0..9999), B4 = char *out, B3 = return address.
+; Clobbers: A0, A1, A4, A5, A6, A7, A8, A9, B4.
+\t.def Aw_itoa4
+\t.align 32
+Aw_itoa4:
+           ZERO.L1       A7                ; A7 = started (non-zero digit emitted)
+           MVK.S1        48,A8             ; A8 = ASCII '0'
+           MVK.S1        1000,A6           ; A6 = divisor (1000 -> 100 -> 10 -> 1)
+           MVKL.S1       52429,A9
+           MVKH.S1       52429,A9          ; A9 = round(2^19 / 10)
+Aw_itoa4_dloop:
+           ZERO.L1       A5                ; A5 = digit (0..9)
+Aw_itoa4_sloop:
+           CMPLT.L1      A4,A6,A0
+   [ A0]   BNOP.S1       Aw_itoa4_emit,5
+           SUB.L1        A4,A6,A4
+           ADD.L1        A5,1,A5
+           BNOP.S1       Aw_itoa4_sloop,5
+Aw_itoa4_emit:
+           OR.L1         A5,A7,A0          ; emit if started or digit != 0
+   [ A0]   MVK.S1        1,A7
+           ADD.L1        A5,A8,A5
+   [ A0]   STB.D2T1      A5,*B4++[1]
+           MPY32.M1      A6,A9,A6          ; div = (div * 52429) >> 19
+           NOP           3                 ; MPY32 4-cycle latency
+           SHRU.S1       A6,19,A6
+           CMPGT.L1      A6,1,A0           ; more places while div > 1 (100, 10)
+   [ A0]   BNOP.S1       Aw_itoa4_dloop,5
+           ADD.L1        A4,A8,A4          ; ones digit (always emitted)
+           STB.D2T1      A4,*B4++[1]
+           ZERO.L1       A0
+           BNOP.S2       B3,4              ; return (STB rides last delay slot)
+           STB.D2T1      A0,*B4[0]         ; NUL terminator
+""" if any(p.get("time_sync") for p in m["params"]) else ""
+
+    itoa_dhz_helper = """
+; --- Aw_itoa_dhz: format unsigned 0..999 (tenths of Hz, 0.0..99.9) in A4 as
+; ASCII decimal into *B4, NUL-terminated ("0.1", "1.5", "10.0", "99.9").
+; Inputs: A4 = dhz (0..999), B4 = char *out, B3 = return address.
+; Clobbers: A0, A4, A5, A6, A8, B4.
+\t.def Aw_itoa_dhz
+\t.align 32
+Aw_itoa_dhz:
+           MVK.S1        48,A8             ; A8 = ASCII '0'
+           MVK.S1        100,A6            ; A6 = 100
+           ZERO.L1       A5                ; A5 = hundreds digit (0..9)
+Aw_itoa_dhz_h:
+           CMPLT.L1      A4,A6,A0
+   [ A0]   BNOP.S1       Aw_itoa_dhz_hdone,5
+           SUB.L1        A4,A6,A4
+           ADD.L1        A5,1,A5
+           BNOP.S1       Aw_itoa_dhz_h,5
+Aw_itoa_dhz_hdone:
+           MV.L1         A5,A0             ; emit hundreds only if non-zero
+           ADD.L1        A5,A8,A5
+   [ A0]   STB.D2T1      A5,*B4++[1]
+           MVK.S1        10,A6             ; A6 = 10
+           ZERO.L1       A5                ; A5 = tens (ones-of-Hz) digit (0..9)
+Aw_itoa_dhz_t:
+           CMPLT.L1      A4,A6,A0
+   [ A0]   BNOP.S1       Aw_itoa_dhz_tdone,5
+           SUB.L1        A4,A6,A4
+           ADD.L1        A5,1,A5
+           BNOP.S1       Aw_itoa_dhz_t,5
+Aw_itoa_dhz_tdone:
+           ADD.L1        A5,A8,A5          ; ones-of-Hz digit (always emitted)
+           STB.D2T1      A5,*B4++[1]
+           MVK.S1        46,A5             ; ASCII '.'
+           STB.D2T1      A5,*B4++[1]
+           ADD.L1        A4,A8,A4          ; tenths digit (always emitted)
+           STB.D2T1      A4,*B4++[1]
+           ZERO.L1       A0
+           BNOP.S2       B3,4              ; return (STB rides last delay slot)
+           STB.D2T1      A0,*B4[0]         ; NUL terminator
+""" if any(p.get("lfo_sync") for p in m["params"]) else ""
+
+    return dll + init + onf + call_stub + itoa_helper + itoa_dhz_helper
 
 
 def gen_const_data(m: dict, table_entries_asm: str, coe_words_asm: str) -> str:
@@ -411,7 +514,10 @@ def gen_const_data(m: dict, table_entries_asm: str, coe_words_asm: str) -> str:
     # param table must stay
     # FIRST in .const (loader contract, verify_cleanroom "table not first").
     for p in m["params"]:
-        vals = p.get("values")
+        is_sync = bool(p.get("time_sync") or p.get("lfo_sync"))
+        vals = (p.get("values")
+                or (p["time_sync"]["notes"] if p.get("time_sync") else None)
+                or (p["lfo_sync"]["notes"] if p.get("lfo_sync") else None))
         if not vals:
             continue
         stride = p["value_stride"]      # set by zd2_make_effect (VALUE_STRIDE)
@@ -419,7 +525,7 @@ def gen_const_data(m: dict, table_entries_asm: str, coe_words_asm: str) -> str:
                   f"Aw_P{p['index']}_tab:\t\t; '{p['name']}' labels,"
                   f" {stride}-byte stride"]
         for v, label in enumerate(vals):
-            packed = label.encode("ascii").ljust(stride, b"\0")
+            packed = encode_param_label(label, stride, use_note_glyphs=is_sync)
             body = ",".join(str(b) for b in packed)
             lines.append(f"           .byte {body}\t; {v} = '{label}'")
 

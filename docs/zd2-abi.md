@@ -105,13 +105,24 @@ pointers:
 | instance[0] | The host's parameter object (the thing get_param reads) |
 | instance[1] | The live coefficient table (float32) |
 | instance[2] | Your per-instance state, state_bytes of it, zeroed at init |
+| instance[3] | Pointer to the slot's 3-word external SDRAM delay-buffer descriptor (base, end, size) |
 
-A fourth slot points at delay-line memory; it has rules of its own and this
-page does not cover them. Leave it alone.
+No stock blob declares how big the instance[2] state area is. The observed safe
+floor is 192 bytes: one stock effect zeroes 644, so the real grant is probably
+larger, but 192 is what is proven. Keep all your mutable per-instance state in
+instance[2].
 
-No stock blob declares how big the state area is. The observed safe floor is 192
-bytes: one stock effect zeroes 644, so the real grant is probably larger, but
-192 is what is proven. Keep all your mutable per-instance state in instance[2].
+Unlike instance[2], instance[3] carries its own size at runtime in a 3-word
+descriptor (`dd[0]` = base, `dd[1]` = end, `dd[2]` = size in bytes). Its size on
+the MS-70CDR+ is inferred directly from stock DELAY_C.ZD2:
+`_Fx_DLY_Delay_calc_time_sample` computes `samples = (441 * ms) / 10` up to
+4000 ms (176,400 float32 samples = 705,600 bytes), `Fx_DLY_Delay_time_edit`
+subtracts 1 specifically at `ms == 4000` (176,399 max tap offset so the read tap
+does not wrap onto the write cursor), and `Fx_DLY_Delay` indexes float32 words
+inside `[dd[0], dd[1])` wrapping by `dd[2]`. Always validate all three descriptor
+words before dereferencing instance[3]; see
+[c6745-memory-hierarchy.md](c6745-memory-hierarchy.md#per-slot-sdram-buffer-instance3--safe-limits)
+for the guard prologue and how SDRAM and the L1D/L2 caches behave on the pedal.
 
 ## Coefficients
 
@@ -155,18 +166,33 @@ write a handler by hand.
 | Offset | Service | What it does |
 |---|---|---|
 | ctx+12 (word 3) | ramp(dest, target, rate) | Register a host-driven fade ramp on one float. The on/off handler uses it at rate 705.6 for the bypass crossfade. Confirmed on hardware. |
-| ctx+16 (word 4) | smooth(dest, target, rate) | Host-side parameter smoothing, the stock VOL/Bal glide. Confirmed on hardware, with the caveat below. |
+| ctx+16 (word 4) | smooth(dest, target, rate) | Host-side float32 parameter smoothing, the stock VOL/Bal glide. Confirmed on hardware; see per-sample playback below. |
+| ctx+20 (word 5) | ramp_i32(dest, target, rate) | Q31 fixed-point equivalent of `ramp` (e.g. rate `705`), used by stock LFO/modulation edit handlers. |
+| ctx+24 (word 6) | smooth_i32(dest, target, rate) | Q31 fixed-point equivalent of `smooth` (e.g. rate `0x003deb7d`), used by stock LFO/modulation edit handlers. |
+| ctx+28 (word 7) | float **ramp_dst | Per-sample float32 ramp target pointer (`*ctx[7]` points to the ramping `coeff[slot]`, or a harmless sink word when idle). Paired with `ctx[8]`; read by 138 of 149 stock effects. |
+| ctx+32 (word 8) | float *ramp_buf | 16-word (`64 B`) per-sample float32 ramp values for the current block (reads zeros when no ramp is active; adjacent live firmware state begins at `+64`, never write past `+64`). |
+| ctx+36 (word 9) | int32_t **lfo_ramp_dst | Per-sample Q31 fixed-point ramp target pointer (`*ctx[9]`), driven by `ctx[5]`/`ctx[6]`. Paired with `ctx[10]`; read by 39 of 149 stock effects (LFO/modulation effects). |
+| ctx+40 (word 10) | int32_t *lfo_ramp_buf | 16-word (`64 B`) per-sample Q31 ramp values for the current block, streamed inside the 16-sample LFO loop of modulation effects (`AUTOPN_C`, `CHORUS_C`, `PHASER_C`, `STONEPHA`, `DUOTREM`, etc.). |
+| ctx+136 (word 34) | note_to_ms(note_idx, max_ms) | Return the integer duration in ms for a note division at the pedal's global BPM, clamped to max_ms (see BPM sync note indices below; e.g. note_idx = 6 is a 1/4 note). |
 | ctx+160 (word 40) | get_param(obj, index) | Return the current UI value of parameter-table entry index. First argument is instance[0]. Confirmed on hardware. |
 | ctx+172 (word 43) | memcpy(dst, src, nbytes) | init uses it to copy the effect's ROM coefficient defaults into the live table. Confirmed on hardware. |
 | ctx+176 (word 44) | memset(dst, val, nbytes) | init uses it to zero the per-instance state area. Confirmed on hardware. |
 
-The smoothing caveat: the ctx+16 smooth service is how stock effects glide their
-VOL and Bal knobs without zippering. When a DIY kernel consumes its output,
-though, a fast knob twist zipper-clicks, and how stock stays click-free through
-the same service is still open. So the approach that works, and the one the gain
-effect uses, is to keep the stock_vol curve on the parameter and smooth the value
-with a one-pole filter inside the kernel, per sample. That is click-free and does
-not lean on the service at all.
+How host smoothing stays click-free (and why DIY kernels usually skip it): the
+host pre-computes 16 per-sample ramp values into `ctx[8][0..15]` (float32, for
+`ctx[3]`/`ctx[4]`) and `ctx[10][0..15]` (Q31, for `ctx[5]`/`ctx[6]`), and points
+`*ctx[7]` / `*ctx[9]` at the ramping `coeff[slot]` (or a dummy sink when idle).
+Stock audio loops explicitly stream `**(float **)ctx[7] = ((float *)ctx[8])[i]`
+(and `**(int32_t **)ctx[9] = ((int32_t *)ctx[10])[i]` in LFO loops) on every
+sample `i = 0..15` before reading `coeff[...]`. Without that per-sample store,
+`coeff[slot]` only updates at block rate (`2756 Hz`), which zipper-clicks on
+fast knob twists. For DIY kernels, keeping `stock_vol` on the parameter and
+smoothing with a one-pole filter inside the kernel is simpler, self-contained,
+and does not depend on host ramp slots at all.
+
+For C usage examples of each host service (`ctx[3..10]`, `ctx[34]`, `ctx[40]`,
+`ctx[43..44]`) and a full stock-style Q31 LFO example, see
+[host-services-examples.md](host-services-examples.md).
 
 ## Bypass
 
@@ -226,6 +252,64 @@ each one is there because its absence crashed a real pedal. Read
 install and audition it with the safe wrapper described in
 [tools-pedal/README.md](../tools-pedal/README.md).
 
+## Custom C edit handlers and `bpm_sync`
+
+By default, the cleanroom scaffold generates an assembly edit handler that
+scales the raw knob click `0..max` linearly into `0.0..1.0` at `coeff[slot]`.
+For non-linear mappings, multi-slot updates, or host BPM sync, simply define
+the parameter's C edit handler in your `.c` file (cleanroom scaffold only — no
+extra manifest flag required):
+
+* Generated `sh_params.h` always emits `SH_EDIT_<NAME>` (naming
+  `Aw_P<k>_edit_c`, using the same identifier rules as `SH_PARAM_<NAME>`) for
+  every parameter, plus `SH_BIND_EDIT(target, fn)` and
+  `sh_note_to_ms(void **ctx, int note_idx, int max_ms)`.
+* After `cl6x` compiles `kernel_c.obj`, `tools/zd2_make_effect.py` inspects its
+  symbol table: any parameter whose `SH_EDIT_<NAME>` is defined is
+  automatically wired through a small assembly trampoline (`Aw_P<k>_edit`) that
+  fetches the raw click via `ctx+160` and calls
+  `Aw_P<k>_edit_c(int click, float *coeff, void **ctx, int slot)` via
+  `__call_stub` (preserving `_init`'s live registers and return address).
+  Mutually exclusive with `handler_asm`, `curve`, and `smooth`; unexpanded
+  `SH_EDIT_*` typos fail the build loudly.
+* `SH_BIND_EDIT(target, fn)` defines `target` to forward
+  `(click, coeff, ctx, slot)` to a shared `static` helper `fn` (useful when
+  multiple knobs, e.g. `Time L` and `Time R`, share one implementation).
+* `sh_note_to_ms(ctx, note_idx, max_ms)` is a fail-closed wrapper around
+  `ctx[34]` (`ctx+136`), returning `1..max_ms` or `0` if unavailable or out of
+  range.
+* Set `"bpm_sync": true` on a parameter in `manifest.json` to set bit `0x20` in
+  both `w12` and `w13` of its table entry so the firmware invokes its edit
+  handler on global BPM changes as well as knob edits.
+
+C edit handlers compile into `.text` inside `kernel_c.obj`, separate from the
+`.audio` section (and outside the sliced `Fx_SFX_<Sym>` symbol when
+`kernel_section` is `"text"`), so SAFE-DSP checks on the audio kernel remain
+unchanged.
+
+## BPM sync note indices (ctx+136)
+
+Stock delay effects (DELAY_C, STDELAY, ANDLY_C, DUADLY_C, FLTDLY_C, RVRSDL_C,
+PP_DLY_M) pass a zero-based note index to ctx+136 (`note_to_ms(note_idx, max_ms)`)
+starting at 1/16 (skipping 1/32, which is slot 0 in the shared LCD glyph table
+used by ctx+128 LFO-sync effects like AUTOPN_C):
+
+| note_idx | Division | LCD bytes | Quarter-note multiple |
+|---|---|---|---|
+| 0 | 1/16 | 0x17 | 0.25x |
+| 1 | 1/8T | 0x19 ' ' '3' | 0.333x |
+| 2 | 1/16. | 0x17 '.' | 0.375x |
+| 3 | 1/8 | 0x18 | 0.5x |
+| 4 | 1/4T | 0x1a ' ' '3' | 0.667x |
+| 5 | 1/8. | 0x18 '.' | 0.75x |
+| 6 | 1/4 | 0x19 | 1.0x |
+| 7 | 1/4. | 0x19 '.' | 1.5x |
+| 8 | 1/4 x2 (1/2) | 0x19 'x' '2' | 2.0x |
+| 9..22 | 1/4 x3 .. 1/4 x16 | 0x19 'x' '3' .. '16' | 3.0x .. 16.0x |
+
+Always guard against a NULL ctx+136 pointer or an out-of-range return (<= 0 or
+> max_ms) and fail closed.
+
 ## Needs investigating
 
 * Three fields that most stock effects write into the entry struct. Their meaning
@@ -235,6 +319,3 @@ install and audition it with the safe wrapper described in
 * Writable data sections (.fardata, .far) are accepted by the loader, but the
   per-instance semantics are unknown; two chain instances of one effect might
   share them. Until that is settled, keep mutable state in instance[2].
-* How stock effects consume the ctx+16 smoothing service without zippering on
-  fast knob twists. The kernel one-pole sidesteps it, so this is knowledge
-  worth having rather than a blocker.

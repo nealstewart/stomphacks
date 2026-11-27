@@ -233,9 +233,9 @@ transfer to the MS+ pedals, both hardware-falsified here:
 
 ## Needs investigating
 
-* What the static 2756 Hz firmware structure above ctx[0]/ctx[8]
-  actually is, and which component dies when it's overwritten.
-  Forensics only, never write there again.
-* ctx[9]/ctx[10] semantics (read by several stock delays; ignorable,
-  see [zd2-abi.md](zd2-abi.md)).
+* What the static 2756 Hz firmware structure above `ctx[0]`/`ctx[8]`
+  actually is, and which component dies when it's overwritten (`ctx[8]`
+  itself is the 64-byte `float[16]` host ramp playback buffer, see
+  [zd2-abi.md](zd2-abi.md#host-services); bytes `+64` onward are adjacent
+  firmware RAM). Forensics only, never write there again.
 * Who writes the host-owned master-scale coefficient (coeff[4]).

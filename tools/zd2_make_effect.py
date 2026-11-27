@@ -223,6 +223,66 @@ Aw_P{k}_str:
            BNOP.S2       B3,5              ; return
 """
 
+TIME_SYNC_STR_TEMPLATE = """
+; --- generated dual ms/note value-display fn: param '{pname}' (index {k}), w9 -> here
+;     click 0..{ms_max_click} -> "{min_ms}".."{max_ms}" (via Aw_itoa4, 1..4 digits)
+;     click {note_start}..{vmax} -> {labels} (from Aw_P{k}_tab)
+\t.def Aw_P{k}_str
+Aw_P{k}_str:
+           MVK.S1        {ms_max_click},A0 ; A0 = last ms click
+           CMPGTU.L1     A4,A0,A1          ; A1 = (click > ms_max_click)
+   [ A1]   BNOP.S1       Aw_P{k}_str_note,5
+           MVK.S1        {min_ms},A0
+           BNOP.S1       Aw_itoa4,4        ; tail-call Aw_itoa4(ms, B4) -> B3
+           ADD.L1        A4,A0,A4          ; A4 = ms ({min_ms}..{max_ms})
+Aw_P{k}_str_note:
+           SUB.L1        A4,A0,A4
+           SUB.L1        A4,1,A4           ; note_idx = click - ms_max_click - 1
+           MVK.S1        {n_notes_max},A0  ; last valid note_idx
+           CMPGTU.L1     A4,A0,A1
+           MVKL.S2       Aw_P{k}_tab,B5
+           MVKH.S2       Aw_P{k}_tab,B5
+   [ A1]   MV.L1         A0,A4             ; clamp out-of-range
+           SHL.S1        A4,{shift},A4     ; note_idx * {stride}
+           ADD.L2X       A4,B5,B5
+           LDW.D2T1      *+B5[0],A5
+           LDW.D2T1      *+B5[1],A7
+           NOP           5
+           STW.D2T1      A5,*+B4[0]
+           STW.D2T1      A7,*+B4[1]
+           BNOP.S2       B3,5              ; return
+"""
+
+LFO_SYNC_STR_TEMPLATE = """
+; --- generated dual Hz/note value-display fn: param '{pname}' (index {k}), w9 -> here
+;     click 0..{hz_max_click} -> "{min_hz}".."{max_hz}" Hz (via Aw_itoa_dhz, tenths of Hz)
+;     click {note_start}..{vmax} -> {labels} (from Aw_P{k}_tab)
+\t.def Aw_P{k}_str
+Aw_P{k}_str:
+           MVK.S1        {hz_max_click},A0 ; A0 = last Hz click
+           CMPGTU.L1     A4,A0,A1          ; A1 = (click > hz_max_click)
+   [ A1]   BNOP.S1       Aw_P{k}_str_note,5
+{scale_step}           MVK.S1        {min_dhz},A0
+           BNOP.S1       Aw_itoa_dhz,4     ; tail-call Aw_itoa_dhz(dhz, B4) -> B3
+           ADD.L1        A4,A0,A4          ; A4 = dhz ({min_dhz}..{max_dhz})
+Aw_P{k}_str_note:
+           SUB.L1        A4,A0,A4
+           SUB.L1        A4,1,A4           ; note_idx = click - hz_max_click - 1
+           MVK.S1        {n_notes_max},A0  ; last valid note_idx
+           CMPGTU.L1     A4,A0,A1
+           MVKL.S2       Aw_P{k}_tab,B5
+           MVKH.S2       Aw_P{k}_tab,B5
+   [ A1]   MV.L1         A0,A4             ; clamp out-of-range
+           SHL.S1        A4,{shift},A4     ; note_idx * {stride}
+           ADD.L2X       A4,B5,B5
+           LDW.D2T1      *+B5[0],A5
+           LDW.D2T1      *+B5[1],A7
+           NOP           5
+           STW.D2T1      A5,*+B4[0]
+           STW.D2T1      A7,*+B4[1]
+           BNOP.S2       B3,5              ; return
+"""
+
 # Generated per-param edit handler: the hardware-proven edit-handler pattern
 # (get-param -> int-to-float -> scale -> store) with three holes: param index,
 # 1/max scale, coeff slot.
@@ -250,6 +310,31 @@ Aw_P{k}_edit:
            NOP           3
            BNOP.S2X      A1,4              ; return (STW rides the last slot)
            STW.D1T1      A0,*+A6[{slot}]   ; coeff[{slot}] = 0.0 .. 1.0
+"""
+
+HANDLER_C_TEMPLATE = """
+; --- generated C edit-handler trampoline: param '{pname}' (index {k}, slot {slot}) ---
+\t.ref Aw_P{k}_edit_c
+\t.def Aw_P{k}_edit
+Aw_P{k}_edit:
+           MV.L2         B4,B5             ; B5 = ctx (survives __call_stub)
+           MVK.S2        160,B4
+           ADD.L2        B5,B4,B4
+           LDW.D2T2      *B4[0],B0         ; B0 = host get_param (ctx+160)
+           LDW.D1T1      *A4[1],A7         ; A7 = coeff (instance[1]; survives __call_stub)
+           MV.L1X        B3,A1             ; A1 = return address (survives __call_stub)
+           LDW.D1T1      *A4[0],A4         ; A4 = host param obj (instance[0])
+           MVK.L2        {k},B4            ; B4 = param index k
+           NOP           1
+           CALLP.S2      __call_stub,B3    ; A4 = click = get_param(obj, k)
+ ||        MV.L2         B0,B31
+           MVKL.S2       Aw_P{k}_edit_c,B31
+           MVKH.S2       Aw_P{k}_edit_c,B31 ; B31 = C edit handler
+           MV.L2X        A7,B4             ; B4 = coeff (arg 2)
+           MV.L1X        B5,A6             ; A6 = ctx   (arg 3)
+           MVK.L2        {slot},B6         ; B6 = coeff slot (arg 4)
+           CALLP.S2      __call_stub,B3    ; Aw_P{k}_edit_c(click, coeff, ctx, slot)
+           BNOP.S2X      A1,5              ; return
 """
 
 # Stock VOL curve handler (decoded stock behavior, independent implementation):
@@ -605,11 +690,15 @@ def load_manifest(path: Path) -> dict:
         if (isinstance(p.get("values"), list) and p["values"]
                 and p.get("max") is None):
             p["max"] = len(p["values"]) - 1
-        if not isinstance(p.get("max"), int) or not (1 <= p["max"] <= 1000):
-            problems.append(f"param '{nm}': integer max 1..1000 required")
-        if not isinstance(p.get("default"), int) \
-                or not (0 <= p["default"] <= p.get("max", 0)):
-            problems.append(f"param '{nm}': integer default 0..max required")
+        if p.get("time_sync") is None and p.get("lfo_sync") is None:
+            if not isinstance(p.get("max"), int) or isinstance(p.get("max"), bool) \
+                    or not (1 <= p["max"] <= 1000):
+                problems.append(f"param '{nm}': integer max 1..1000 required")
+            if not isinstance(p.get("default"), int) or isinstance(p.get("default"), bool) \
+                    or not (0 <= p["default"] <= p.get("max", 0)):
+                problems.append(f"param '{nm}': integer default 0..max required")
+        elif not isinstance(p.get("default"), int) or isinstance(p.get("default"), bool):
+            problems.append(f"param '{nm}': integer default required")
         # "smooth": true -> host-smoothed handler at the stock rate;
         # a number -> host-smoothed at that rate (probe/tuning use);
         # absent/false -> direct write (right for discrete params).
@@ -707,6 +796,111 @@ def load_manifest(path: Path) -> dict:
                     problems.append(f"param '{nm}': values and smooth are "
                                     "mutually exclusive (a selector must step, "
                                     "not ramp, between values)")
+        if p.get("time_sync") is not None:
+            ts = p["time_sync"]
+            if m.get("scaffold") != "cleanroom":
+                problems.append(f"param '{nm}': time_sync requires the cleanroom "
+                                "scaffold")
+            elif not isinstance(ts, dict):
+                problems.append(f"param '{nm}': time_sync must be an object")
+            elif p.get("values") is not None:
+                problems.append(f"param '{nm}': time_sync and values are "
+                                "mutually exclusive")
+            elif p.get("curve") is not None:
+                problems.append(f"param '{nm}': time_sync and curve are "
+                                "mutually exclusive")
+            elif p.get("smooth_hex") is not None:
+                problems.append(f"param '{nm}': time_sync and smooth are "
+                                "mutually exclusive (time_sync steps between "
+                                "ms and note divisions)")
+            else:
+                import zd2_cleanroom
+                min_ms = ts.get("min_ms")
+                max_ms = ts.get("max_ms")
+                notes = ts.get("notes") or ["1/16", "1/8T", "1/8", "1/4T", "1/8.", "1/4", "1/4."]
+                if not isinstance(min_ms, int) or isinstance(min_ms, bool) or not isinstance(max_ms, int) or isinstance(max_ms, bool):
+                    problems.append(f"param '{nm}': time_sync min_ms and max_ms must be integers")
+                elif min_ms < 0 or max_ms > 9999 or min_ms > max_ms:
+                    problems.append(f"param '{nm}': time_sync requires 0 <= min_ms ({min_ms}) <= max_ms ({max_ms}) <= 9999")
+                elif not isinstance(notes, list) or not notes or not all(isinstance(n, str) and n for n in notes):
+                    problems.append(f"param '{nm}': time_sync notes must be a non-empty list of strings")
+                else:
+                    for n in notes:
+                        raw = zd2_cleanroom.ZOOM_NOTE_GLYPHS.get(n)
+                        if raw is None:
+                            if not n.isascii() or not n.isprintable():
+                                problems.append(f"param '{nm}': time_sync note {n!r} must be printable ASCII or a known glyph")
+                                continue
+                            raw = n.encode("ascii")
+                        if len(raw) > VALUE_MAX_CHARS:
+                            problems.append(
+                                f"param '{nm}': time_sync note {n!r} encodes to {len(raw)} bytes; "
+                                f"{VALUE_STRIDE}-byte stride allows {VALUE_MAX_CHARS} + NUL")
+                    ts["notes"] = notes
+                    p["value_stride"] = VALUE_STRIDE
+                    p["max"] = (max_ms - min_ms) + len(notes)
+                    if isinstance(p.get("default"), int) and not isinstance(p.get("default"), bool) \
+                            and not (0 <= p["default"] <= p["max"]):
+                        problems.append(
+                            f"param '{nm}': default {p['default']} out of time_sync range 0..{p['max']}")
+        if p.get("lfo_sync") is not None:
+            ls = p["lfo_sync"]
+            if m.get("scaffold") != "cleanroom":
+                problems.append(f"param '{nm}': lfo_sync requires the cleanroom "
+                                "scaffold")
+            elif not isinstance(ls, dict):
+                problems.append(f"param '{nm}': lfo_sync must be an object")
+            elif p.get("values") is not None or p.get("time_sync") is not None:
+                problems.append(f"param '{nm}': lfo_sync is mutually exclusive "
+                                "with values and time_sync")
+            elif p.get("curve") is not None:
+                problems.append(f"param '{nm}': lfo_sync and curve are "
+                                "mutually exclusive")
+            elif p.get("smooth_hex") is not None:
+                problems.append(f"param '{nm}': lfo_sync and smooth are "
+                                "mutually exclusive (lfo_sync uses edit_c Q31 smoothing)")
+            else:
+                import zd2_cleanroom
+                min_dhz = ls.get("min_dhz")
+                max_dhz = ls.get("max_dhz")
+                step_dhz = ls.get("step_dhz", 1)
+                notes = ls.get("notes") or [
+                    "1/32", "1/16", "1/8T", "1/16.", "1/8",
+                    "1/4T", "1/8.", "1/4", "1/4.", "1/2",
+                ]
+                if (not isinstance(min_dhz, int) or isinstance(min_dhz, bool)
+                        or not isinstance(max_dhz, int) or isinstance(max_dhz, bool)
+                        or not isinstance(step_dhz, int) or isinstance(step_dhz, bool)):
+                    problems.append(f"param '{nm}': lfo_sync min_dhz, max_dhz, step_dhz must be integers")
+                elif min_dhz < 0 or max_dhz > 999 or min_dhz > max_dhz or step_dhz < 1:
+                    problems.append(
+                        f"param '{nm}': lfo_sync requires 0 <= min_dhz ({min_dhz}) <= max_dhz ({max_dhz}) <= 999 "
+                        f"and step_dhz ({step_dhz}) >= 1")
+                elif (max_dhz - min_dhz) % step_dhz != 0:
+                    problems.append(
+                        f"param '{nm}': lfo_sync (max_dhz - min_dhz) must be divisible by step_dhz")
+                elif not isinstance(notes, list) or not notes or not all(isinstance(n, str) and n for n in notes):
+                    problems.append(f"param '{nm}': lfo_sync notes must be a non-empty list of strings")
+                else:
+                    for n in notes:
+                        raw = zd2_cleanroom.ZOOM_NOTE_GLYPHS.get(n)
+                        if raw is None:
+                            if not n.isascii() or not n.isprintable():
+                                problems.append(f"param '{nm}': lfo_sync note {n!r} must be printable ASCII or a known glyph")
+                                continue
+                            raw = n.encode("ascii")
+                        if len(raw) > VALUE_MAX_CHARS:
+                            problems.append(
+                                f"param '{nm}': lfo_sync note {n!r} encodes to {len(raw)} bytes; "
+                                f"{VALUE_STRIDE}-byte stride allows {VALUE_MAX_CHARS} + NUL")
+                    ls["step_dhz"] = step_dhz
+                    ls["notes"] = notes
+                    p["value_stride"] = VALUE_STRIDE
+                    p["max"] = ((max_dhz - min_dhz) // step_dhz) + len(notes)
+                    if isinstance(p.get("default"), int) and not isinstance(p.get("default"), bool) \
+                            and not (0 <= p["default"] <= p["max"]):
+                        problems.append(
+                            f"param '{nm}': default {p['default']} out of lfo_sync range 0..{p['max']}")
         if len(nm) > VALUE_UI_CHARS:
             warn(f"param '{nm}': the NAME is {len(nm)} chars; the pedal "
                  f"truncates past {VALUE_UI_CHARS} unless selected")
@@ -768,6 +962,12 @@ def load_manifest(path: Path) -> dict:
                                     f"{hp}")
                 else:
                     p["handler_asm_path"] = str(hp)
+        p["edit_c"] = False   # populated after cl6x by detect_edit_c_handlers()
+        bs = p.setdefault("bpm_sync", False)
+        if not isinstance(bs, bool):
+            problems.append(f"param '{nm}': bpm_sync must be true or false")
+        elif bs and m.get("scaffold") != "cleanroom":
+            problems.append(f"param '{nm}': bpm_sync requires the cleanroom scaffold")
     expl_slots = [p.get("slot") for p in m["params"]
                   if p.get("slot") is not None]
     if len(set(expl_slots)) != len(expl_slots):
@@ -1004,6 +1204,10 @@ def macro_name(pname: str) -> str:
     return "SH_PARAM_" + re.sub(r"[^A-Za-z0-9]", "_", pname).upper()
 
 
+def edit_macro_name(pname: str) -> str:
+    return "SH_EDIT_" + re.sub(r"[^A-Za-z0-9]", "_", pname).upper()
+
+
 # --------------------------------------------------------------------------
 # generation
 # --------------------------------------------------------------------------
@@ -1018,6 +1222,7 @@ def gen_params_header(m: dict) -> str:
         " * ABI: docs/zd2-abi.md. */",
         "#ifndef SH_PARAMS_H",
         "#define SH_PARAMS_H",
+        "#include <stdint.h>",
         "",
         "/* the scaffold param table points at this symbol; the pragma places",
         " * the kernel in the dedicated .audio section (vaddr 0x7800), unless",
@@ -1075,21 +1280,84 @@ def gen_params_header(m: dict) -> str:
             f"#define {macro_name(p['name'])} {p['slot']}"
             f"  /* '{p['name']}' knob 0..{p['max']} -> {rng},"
             f" default {p['default']} */")
+    lines += [
+        "",
+        "/* host BPM sync helper: ctx[34] (ctx+136) = note_to_ms(note_idx, max_ms);",
+        " * returns duration in ms (1..max_ms) or 0 if unavailable / out of range */",
+        "typedef int (*sh_note_to_ms_fn)(int note_idx, int max_ms);",
+        "",
+        "static inline int sh_note_to_ms(void **ctx, int note_idx, int max_ms) {",
+        "    sh_note_to_ms_fn fn = ctx ? (sh_note_to_ms_fn)ctx[34] : (sh_note_to_ms_fn)0;",
+        "    if (!fn) return 0;",
+        "    int ms = fn(note_idx, max_ms);",
+        "    return (ms > 0 && ms <= max_ms) ? ms : 0;",
+        "}",
+        "",
+        "/* host parameter ramp/smoothing helpers (ctx[3..6]; docs/zd2-abi.md) */",
+        "typedef void (*sh_ramp_f32_fn)(float *dest, float target, float rate);",
+        "typedef void (*sh_ramp_i32_fn)(int32_t *dest, int32_t target, int32_t rate);",
+        "",
+        "static inline void sh_ramp_f32(void **ctx, float *dest, float target, float rate) {",
+        "    sh_ramp_f32_fn fn = ctx ? (sh_ramp_f32_fn)ctx[3] : (sh_ramp_f32_fn)0;",
+        "    if (fn) fn(dest, target, rate); else *dest = target;",
+        "}",
+        "",
+        "static inline void sh_smooth_f32(void **ctx, float *dest, float target, float rate) {",
+        "    sh_ramp_f32_fn fn = ctx ? (sh_ramp_f32_fn)ctx[4] : (sh_ramp_f32_fn)0;",
+        "    if (fn) fn(dest, target, rate); else *dest = target;",
+        "}",
+        "",
+        "static inline void sh_ramp_i32(void **ctx, int32_t *dest, int32_t target, int32_t rate) {",
+        "    sh_ramp_i32_fn fn = ctx ? (sh_ramp_i32_fn)ctx[5] : (sh_ramp_i32_fn)0;",
+        "    if (fn) fn(dest, target, rate); else *dest = target;",
+        "}",
+        "",
+        "static inline void sh_smooth_i32(void **ctx, int32_t *dest, int32_t target, int32_t rate) {",
+        "    sh_ramp_i32_fn fn = ctx ? (sh_ramp_i32_fn)ctx[6] : (sh_ramp_i32_fn)0;",
+        "    if (fn) fn(dest, target, rate); else *dest = target;",
+        "}",
+        "",
+        "/* bind a SH_EDIT_<NAME> hook to a shared static C helper */",
+        "#define SH_BIND_EDIT(target, fn) \\",
+        "    void target(int click, float *coeff, void **ctx, int slot) { \\",
+        "        fn(click, coeff, ctx, slot); \\",
+        "    }",
+        "",
+        "/* optional C edit-handler hooks: define void SH_EDIT_<NAME>(...) in your",
+        " * .c file (or bind with SH_BIND_EDIT) and the builder auto-wires it */",
+    ]
+    for p in m["params"]:
+        k = p["index"]
+        lines.append(f"#define {edit_macro_name(p['name'])} Aw_P{k}_edit_c")
+        lines.append(
+            f"void Aw_P{k}_edit_c(int click, float *coeff, void **ctx, int slot);")
     lines += ["", "#endif /* SH_PARAMS_H */", ""]
     return "\n".join(lines)
+
+
+# Param-table entry flag bits (words w12 and w13; docs/zd2-abi.md, docs/building-effects.md).
+PARAM_W12_UI_STOP         = 0x000002  # Last UI-visible knob (stops the UI knob-page walk)
+PARAM_W12_PHYSICAL_END    = 0x000004  # Physical end of the param table (must sit on final entry)
+PARAM_W12_UI_KNOB         = 0x000010  # Standard UI-visible knob / selector parameter
+PARAM_W12_BPM_SYNC        = 0x000020  # Host BPM / time-sync parameter (paired with PARAM_W13_BPM_SYNC)
+PARAM_W12_POST_UI_SHOWN   = 0x008000  # Shown after the UI stop (e.g. trailing footswitch toggle)
+PARAM_W12_FOOTSWITCH_MODE = 0x100000  # Footswitch LATCH/UNLATCH mode toggle marker (stock EXCITER)
+
+PARAM_W13_FOOTSWITCH_MODE = 0x02      # Footswitch-mode toggle marker in w13
+PARAM_W13_BPM_SYNC        = 0x20      # Host BPM / time-sync parameter flag in w13
 
 
 def param_table_flags(m: dict, p: dict) -> tuple:
     """(w12, w13) for a param-table entry, accounting for the optional
     footswitch-mode toggle (docs/building-effects.md "Footswitch").
 
-    Normal params: w12 = 0x16 on the LAST UI knob (the bit-0x02 UI stop),
-    0x10 otherwise; w13 = 0. This is byte-identical to the pre-footswitch
+    Normal params: w12 = 0x16 on the LAST UI knob (UI_KNOB | PHYSICAL_END | UI_STOP),
+    0x10 (UI_KNOB) otherwise; w13 = 0. This is byte-identical to the pre-footswitch
     builder for any manifest with no footswitch param.
 
     A "footswitch_toggle" param carries the stock EXCITER/KKFLNG1U flags
-    (w12 |= 0x100000 footswitch marker | 0x8000 shown-after-UI-stop;
-    w13 = 0x02). Two placements:
+    (w12 |= FOOTSWITCH_MODE | POST_UI_SHOWN; w13 = PARAM_W13_FOOTSWITCH_MODE).
+    Two placements:
       - "trailing": true  -> a post-UI-stop toggle (matches EXCITER's
         `ON/OFF` = LATCH/UnLATCH exactly, 0x108004); excluded from the
         UI-knob set, so the last real knob keeps the UI stop. This is the
@@ -1105,24 +1373,31 @@ def param_table_flags(m: dict, p: dict) -> tuple:
     is_last_entry = p is params[-1]
     has_trailing = any(q.get("trailing") for q in params)
     if p.get("footswitch_toggle"):
-        w12 = 0x100000 | 0x8000
+        w12 = PARAM_W12_FOOTSWITCH_MODE | PARAM_W12_POST_UI_SHOWN
         if not p.get("trailing"):                 # also a UI knob
-            w12 |= 0x10
+            w12 |= PARAM_W12_UI_KNOB
             if is_last_ui:
-                w12 |= 0x02                        # UI stop
+                w12 |= PARAM_W12_UI_STOP
             if is_last_entry:
-                w12 |= 0x04                        # physical end
+                w12 |= PARAM_W12_PHYSICAL_END
         elif is_last_entry:
-            w12 |= 0x04                            # trailing toggle: physical end
-        return w12, 0x02
-    # Normal param. The last UI knob is the UI stop (bit 0x02); it is ALSO the
-    # table's physical end (bit 0x04) ONLY when no trailing footswitch param
-    # follows. With a trailing toggle the 0x04 must move to that toggle, or the
-    # pedal's param-table walk stops at the UI stop and never shows the toggle
+            w12 |= PARAM_W12_PHYSICAL_END
+        return w12, PARAM_W13_FOOTSWITCH_MODE
+    # Normal param. The last UI knob gets UI_STOP; it ALSO gets PHYSICAL_END ONLY
+    # when no trailing footswitch param follows. With a trailing toggle,
+    # PHYSICAL_END must move to that toggle, or the pedal's param-table walk
+    # stops at the UI stop and never shows the toggle
     # (stock EXCITER: VOL = 0x12 UI-stop, ON/OFF = 0x108004 physical-end).
+    w12 = PARAM_W12_UI_KNOB
     if is_last_ui:
-        return (0x12 if has_trailing else 0x16), 0x00
-    return 0x10, 0x00
+        w12 |= PARAM_W12_UI_STOP
+        if not has_trailing:
+            w12 |= PARAM_W12_PHYSICAL_END
+    w13 = 0x00
+    if p.get("bpm_sync"):
+        w12 |= PARAM_W12_BPM_SYNC
+        w13 |= PARAM_W13_BPM_SYNC
+    return w12, w13
 
 
 def gen_table_entries(m: dict) -> str:
@@ -1144,6 +1419,12 @@ def gen_table_entries(m: dict) -> str:
             (f"           .word Aw_P{p['index']}_str"
              f"\t\t; w9 = value-display fn ({'/'.join(p['values'])})"
              if p.get("values") else
+             f"           .word Aw_P{p['index']}_str"
+             f"\t\t; w9 = dual ms/note display fn ({p['time_sync']['min_ms']}..{p['time_sync']['max_ms']}ms + notes)"
+             if p.get("time_sync") else
+             f"           .word Aw_P{p['index']}_str"
+             f"\t\t; w9 = dual Hz/note display fn ({p['lfo_sync']['min_dhz']/10:.1f}..{p['lfo_sync']['max_dhz']/10:.1f}Hz + notes)"
+             if p.get("lfo_sync") else
              "           .word 0x00000000\t\t; w9 = 0: host renders the"
              " integer"),
             "           .word 0x00000000",
@@ -1152,7 +1433,9 @@ def gen_table_entries(m: dict) -> str:
             + ("  (0b110 = LAST user param)" if w12 == 0x16
                else "  (footswitch-mode toggle)" if w12 & 0x8000 else ""),
             f"           .word 0x{w13:08x}"
-            + ("\t\t; w13 (footswitch-mode toggle)" if w13 else ""),
+            + ("\t\t; w13 (footswitch-mode toggle)" if w13 == PARAM_W13_FOOTSWITCH_MODE
+               else "\t\t; w13 (bpm_sync)" if w13 & PARAM_W13_BPM_SYNC
+               else "\t\t; w13" if w13 else ""),
         ]
     return "\n".join(out)
 
@@ -1168,6 +1451,26 @@ def param_default_coeff(p: dict) -> float:
     return d / p["max"]
 
 
+def param_default_word(p: dict) -> int:
+    """ROM _Coe 32-bit word for a param: Q31 integer word for lfo_sync or
+    explicit q31_default params, otherwise IEEE-754 float32 bits."""
+    if p.get("q31_default") is not None:
+        return int(p["q31_default"]) & 0xFFFFFFFF
+    if p.get("lfo_sync"):
+        ls = p["lfo_sync"]
+        min_dhz = int(ls["min_dhz"])
+        max_dhz = int(ls["max_dhz"])
+        step_dhz = int(ls.get("step_dhz", 1))
+        hz_max_click = (max_dhz - min_dhz) // step_dhz
+        d = int(p["default"])
+        if d <= hz_max_click:
+            hz = (min_dhz + d * step_dhz) * 0.1
+        else:
+            hz = 2.0  # 120 BPM quarter-note fallback until _init edit call runs
+        return int(round(hz * 97391.548)) & 0xFFFFFFFF
+    return f32_hex(param_default_coeff(p))
+
+
 def gen_coe_words(m: dict) -> str:
     # cleanroom _Coe is 16 words (the 12-param maximum); the bitcrush
     # scaffold keeps the stock 12-word table its transform rewrites in place.
@@ -1176,7 +1479,7 @@ def gen_coe_words(m: dict) -> str:
                else 12)
     coe = [0] * n_words
     for p in m["params"]:
-        coe[p["slot"]] = f32_hex(param_default_coeff(p))
+        coe[p["slot"]] = param_default_word(p)
     lines = []
     slot_notes = {0: "bypass fade (host)", 1: "bypass fade (host)",
                   2: "reserved", 4: "unknown host writer, keep 0"}
@@ -1206,6 +1509,9 @@ def gen_handlers(m: dict) -> str:
                 out.append(f"\n; --- CUSTOM handler asm ({Path(hp).name}), "
                            "spliced verbatim (manifest handler_asm) ---\n"
                            + src + "\n")
+        elif p.get("edit_c"):
+            out.append(HANDLER_C_TEMPLATE.format(
+                pname=p["name"], k=p["index"], slot=p["slot"]))
         elif p.get("curve") == "stock_vol":
             smoothed = p["smooth_hex"] is not None
             tail = CURVE_SMOOTH_TAIL if smoothed else CURVE_DIRECT_TAIL
@@ -1226,18 +1532,56 @@ def gen_handlers(m: dict) -> str:
             out.append(HANDLER_TEMPLATE.format(
                 pname=p["name"], k=p["index"], slot=p["slot"],
                 pmax=p["max"], scale=f32_hex(1.0 / p["max"])))
-        # selector params additionally get a w9 value-display function
+        # selector params and time_sync params get a w9 value-display function
         if p.get("values"):
             out.append(GETSTRING_TEMPLATE.format(
                 pname=p["name"], k=p["index"], vmax=p["max"],
                 stride=VALUE_STRIDE, shift=VALUE_STRIDE.bit_length() - 1,
                 labels="/".join(p["values"])))
+        elif p.get("time_sync"):
+            ts = p["time_sync"]
+            ms_max_click = int(ts["max_ms"]) - int(ts["min_ms"])
+            notes = ts["notes"]
+            out.append(TIME_SYNC_STR_TEMPLATE.format(
+                pname=p["name"], k=p["index"],
+                min_ms=int(ts["min_ms"]), max_ms=int(ts["max_ms"]),
+                ms_max_click=ms_max_click, note_start=ms_max_click + 1,
+                vmax=p["max"], n_notes_max=len(notes) - 1,
+                stride=VALUE_STRIDE, shift=VALUE_STRIDE.bit_length() - 1,
+                labels="/".join(notes)))
+        elif p.get("lfo_sync"):
+            ls = p["lfo_sync"]
+            min_dhz = int(ls["min_dhz"])
+            max_dhz = int(ls["max_dhz"])
+            step_dhz = int(ls.get("step_dhz", 1))
+            hz_max_click = (max_dhz - min_dhz) // step_dhz
+            notes = ls["notes"]
+            scale_step = (
+                f"           MVK.S1        {step_dhz},A5\n"
+                f"           MPY32.M1      A4,A5,A4\n"
+                f"           NOP           3\n"
+                if step_dhz != 1 else ""
+            )
+            out.append(LFO_SYNC_STR_TEMPLATE.format(
+                pname=p["name"], k=p["index"],
+                min_dhz=min_dhz, max_dhz=max_dhz,
+                min_hz=f"{min_dhz / 10:.1f}", max_hz=f"{max_dhz / 10:.1f}",
+                hz_max_click=hz_max_click, note_start=hz_max_click + 1,
+                scale_step=scale_step,
+                vmax=p["max"], n_notes_max=len(notes) - 1,
+                stride=VALUE_STRIDE, shift=VALUE_STRIDE.bit_length() - 1,
+                labels="/".join(notes)))
     return "".join(out)
 
 
-def handler_landmarks(p: dict) -> tuple:
+def handler_landmarks(p: dict, m: dict | None = None) -> tuple:
     """dis6x-normalized landmark instructions for one generated handler
-    (direct/smooth/curve variant), shared by both verifiers."""
+    (direct/smooth/curve/edit_c variant), shared by both verifiers."""
+    if p.get("edit_c"):
+        return (f"MVK.L2 {p['index']},B4",
+                f"MVK.L2 {p['slot']},B6",
+                "CALLP.S2 __call_stub",
+                "BNOP.S2X A1,5")
     if p.get("curve") == "stock_vol":
         frags = (f"MVK.L2 {p['index']},B4",
                  "INTSP.L1 A4,A7", "CMPLT.L1 A4,A8,A0",
@@ -1536,7 +1880,7 @@ def verify(m: dict, builddir: Path, report: list) -> None:
         lbl = f"Aw_P{p['index']}_edit:"
         i = handlers.index(lbl)
         block = "\n".join(handlers[i:i + (50 if p.get("curve") else 26)])
-        for frag in handler_landmarks(p):
+        for frag in handler_landmarks(p, m):
             assert frag in block, \
                 f"handler {lbl} missing '{frag}':\n{block}"
     report.append(f"handlers: {len(m['params'])} generated "
@@ -1621,6 +1965,7 @@ def verify_cleanroom(m: dict, builddir: Path, report: list) -> None:
     text = built.get_section_by_name(".text")
     text_cap = 768 + 128 * len(m["params"])   # scaffold + per-handler budget
     text_cap += 96 * sum(1 for p in m["params"] if p.get("curve"))
+    text_cap += 1024 * sum(1 for p in m["params"] if p.get("edit_c"))
     for hp in sorted({p["handler_asm_path"] for p in m["params"]
                       if p.get("handler_asm_path")}):
         # custom handler asm: budget 4 B per instruction-looking line + slack
@@ -1669,8 +2014,8 @@ def verify_cleanroom(m: dict, builddir: Path, report: list) -> None:
         assert e[12] == want_w12, f"{p['name']}: w12 {e[12]:#x} != {want_w12:#x}"
         assert e[13] == want_w13, f"{p['name']}: w13 {e[13]:#x} != {want_w13:#x}"
         assert e[6] == e[8] == e[10] == e[11] == 0
-        # w9 = value-display fn for a selector, else 0 (host renders the int)
-        if p.get("values"):
+        # w9 = value-display fn for a selector, time_sync, or lfo_sync param, else 0
+        if p.get("values") or p.get("time_sync") or p.get("lfo_sync"):
             assert e[9] == symtab[f"Aw_P{p['index']}_str"], \
                 f"{p['name']}: w9 does not point at its value-display fn"
         else:
@@ -1678,21 +2023,25 @@ def verify_cleanroom(m: dict, builddir: Path, report: list) -> None:
     report.append(f"param table: {2 + len(m['params'])} entries match the "
                   "manifest + ABI doc; end marker on last param")
 
-    # --- selector label tables: the bytes the pedal will actually render
-    selectors = [p for p in m["params"] if p.get("values")]
+    # --- selector, time_sync & lfo_sync label tables: the bytes the pedal will render
+    selectors = [p for p in m["params"]
+                 if p.get("values") or p.get("time_sync") or p.get("lfo_sync")]
     for p in selectors:
         stride = p["value_stride"]
         base = symtab[f"Aw_P{p['index']}_tab"] - cbase
-        for v, label in enumerate(p["values"]):
+        is_sync = bool(p.get("time_sync") or p.get("lfo_sync"))
+        vals = (p.get("values")
+                or (p["time_sync"]["notes"] if p.get("time_sync") else p["lfo_sync"]["notes"]))
+        for v, label in enumerate(vals):
             got = const[base + v * stride: base + (v + 1) * stride]
-            want = label.encode("ascii").ljust(stride, b"\0")
+            want = cr.encode_param_label(label, stride, use_note_glyphs=is_sync)
             assert got == want, \
                 (f"{p['name']}: label {v} in .const is {got!r}, want {want!r}")
-            assert got[len(label)] == 0, f"{p['name']}: label {v} not NUL-term"
+            assert got[-1] == 0, f"{p['name']}: label {v} not NUL-term"
     if selectors:
         report.append(
             "selector labels: " + "; ".join(
-                f"{p['name']} = {'/'.join(p['values'])}" for p in selectors)
+                f"{p['name']} = {'/'.join(p.get('values') or (p['time_sync']['notes'] if p.get('time_sync') else p['lfo_sync']['notes']))}" for p in selectors)
             + f" (w9 -> Aw_P<k>_str, {selectors[0]['value_stride']}-byte"
               " stride, NUL-terminated)")
 
@@ -1715,7 +2064,7 @@ def verify_cleanroom(m: dict, builddir: Path, report: list) -> None:
                              symtab[f"_Fx_SFX_{s}_Coe"] - cbase)
     assigned = {p["slot"] for p in m["params"]}
     for p in m["params"]:
-        want = f32_hex(param_default_coeff(p))
+        want = param_default_word(p)
         assert coe[p["slot"]] == want, \
             f"_Coe[{p['slot']}] = {coe[p['slot']]:#x}, want {want:#x}"
     for i in range(cr.COE_WORDS):
@@ -1815,11 +2164,14 @@ def verify_cleanroom(m: dict, builddir: Path, report: list) -> None:
                           "landmark check SKIPPED; hand-review "
                           f"{m['filename']}.text.dis before upload")
             continue
+        if p.get("edit_c"):
+            csym = f"Aw_P{p['index']}_edit_c"
+            assert csym in symtab, f"edit_c handler symbol {csym} not in symtab"
         i = stream.index(lbl)
         block = "\n".join(stream[i:i + (50 if p.get("curve") else 26)])
-        for frag in handler_landmarks(p):
+        for frag in handler_landmarks(p, m):
             assert frag in block, f"handler {lbl} missing '{frag}':\n{block}"
-    # the generated w9 value-display functions (selector params)
+    # the generated w9 value-display functions (selector + time_sync params)
     for p in [q for q in m["params"] if q.get("values")]:
         lbl = f"Aw_P{p['index']}_str:"
         i = stream.index(lbl)
@@ -1834,7 +2186,15 @@ def verify_cleanroom(m: dict, builddir: Path, report: list) -> None:
                      "STW.D2T1 A5,*+B4[0]", "STW.D2T1 A7,*+B4[1]",
                      "BNOP.S2 B3,5"):
             assert frag in block, f"display fn {lbl} missing '{frag}':\n{block}"
-    n_str = len([q for q in m["params"] if q.get("values")])
+    for p in [q for q in m["params"] if q.get("time_sync") or q.get("lfo_sync")]:
+        lbl = f"Aw_P{p['index']}_str:"
+        i = stream.index(lbl)
+        block = "\n".join(stream[i:i + 70])
+        for frag in ("CMPGTU.L1 A4,A0,A1",
+                     "LDW.D2T1 *+B5[0],A5", "STW.D2T1 A5,*+B4[0]",
+                     "BNOP.S2 B3,5"):
+            assert frag in block, f"sync display fn {lbl} missing '{frag}':\n{block}"
+    n_str = len([q for q in m["params"] if q.get("values") or q.get("time_sync") or q.get("lfo_sync")])
     report.append(f".text: all {4 + len(m['params']) - n_custom + n_str} "
                   "generated functions carry their landmark instructions "
                   f"(full dump: {m['filename']}.text.dis)")
@@ -2058,6 +2418,48 @@ def make_icon(m: dict, builddir: Path, report: list) -> Path:
 # main
 # --------------------------------------------------------------------------
 
+def detect_edit_c_handlers(m: dict, obj_path: Path) -> None:
+    """Inspect kernel_c.obj's .symtab to auto-detect defined Aw_P<k>_edit_c
+    C edit handlers (from void SH_EDIT_<NAME>(...) or SH_BIND_EDIT). Also
+    fails loudly on unexpanded SH_EDIT_* typo symbols or conflicts with
+    handler_asm / curve / smooth."""
+    from elftools.elf.elffile import ELFFile
+
+    with open(obj_path, "rb") as f:
+        elf = ELFFile(f)
+        symtab = elf.get_section_by_name(".symtab")
+        defined = {
+            s.name for s in (symtab.iter_symbols() if symtab else ())
+            if s.name and s["st_shndx"] != "SHN_UNDEF"
+        }
+
+    bad_typos = sorted(s for s in defined if s.startswith("SH_EDIT_"))
+    if bad_typos:
+        valid = ", ".join(edit_macro_name(p["name"]) for p in m["params"])
+        die(f"kernel defines unexpanded edit-handler symbol(s) {bad_typos} "
+            f"(likely a typo); valid macros for this manifest: {valid}")
+
+    problems = []
+    for p in m["params"]:
+        csym = f"Aw_P{p['index']}_edit_c"
+        if csym not in defined:
+            p["edit_c"] = False
+            continue
+        nm = p["name"]
+        if m.get("scaffold") != "cleanroom":
+            problems.append(f"param '{nm}': {edit_macro_name(nm)} requires the cleanroom scaffold")
+        if p.get("handler_asm_path") is not None:
+            problems.append(f"param '{nm}': {edit_macro_name(nm)} and handler_asm are mutually exclusive")
+        if p.get("curve") is not None:
+            problems.append(f"param '{nm}': {edit_macro_name(nm)} and curve are mutually exclusive")
+        if p.get("smooth_hex") is not None:
+            problems.append(f"param '{nm}': {edit_macro_name(nm)} and smooth are mutually exclusive")
+        p["edit_c"] = True
+        print(f"   auto-wired C edit handler: {edit_macro_name(nm)} ({csym})")
+    if problems:
+        die("; ".join(problems))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Build a ZD2 effect from a C kernel + manifest "
@@ -2130,6 +2532,7 @@ def main() -> None:
         + [f"--include_path={d}" for d in includes if d.is_dir()]
         + ["-c", kernel, f"--output_file={builddir / 'kernel_c.obj'}"],
         cwd=builddir)
+    detect_edit_c_handlers(m, builddir / "kernel_c.obj")
 
     if cleanroom:
         print("== 3. generate the clean-room asm ==")
